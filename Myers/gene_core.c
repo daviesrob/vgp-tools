@@ -1,3 +1,6 @@
+#define _GNU_SOURCE  /* for fopencookie() */
+#include <sys/param.h> /* for BSD macro */
+#include <limits.h>    /* for __GLIBC__ macro */
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -7,6 +10,16 @@
 #include <zlib.h>
 
 #include "gene_core.h"
+
+#if defined(__GLIBC__) && !defined(HAVE_FOPENCOOKIE) && !defined(HAVE_FUNOPEN)
+#define HAVE_FOPENCOOKIE
+#endif
+#if defined(BSD4_4) && !defined(HAVE_FOPENCOOKIE) && !defined(HAVE_FUNOPEN)
+#define HAVE_FUNOPEN
+#endif
+#if !defined(HAVE_FOPENCOOKIE) && !defined(HAVE_FUNOPEN)
+#error "Need either fopencookie() or funopen()"
+#endif
 
 /*******************************************************************************************
  *
@@ -54,9 +67,49 @@ char *Strdup(char *name, char *mesg)
   return (s);
 }
 
+#ifdef HAVE_FOPENCOOKIE
+static ssize_t gzread_(void *cookie, char *buf, size_t count)
+{
+  return gzread((gzFile) cookie, buf, count);
+}
+static ssize_t gzwrite_(void *cookie, const char *buf, size_t count)
+{
+  return gzwrite((gzFile) cookie, buf, count);
+}
+static int gzseek_(void *cookie, off64_t *offset, int whence)
+{
+  z_off_t new_offset = gzseek((gzFile) cookie, *offset, whence);
+  *offset = new_offset;
+  return new_offset >= 0 ? 0 : -1;
+}
+static int gzclose_(void *cookie)
+{
+  return gzclose(cookie);
+}
+#else
+static int gzread_(void *cookie, char *buf, int count)
+{
+  return gzread((gzFile) cookie, buf, count);
+}
+static int gzwrite_(void *cookie, const char *buf, int count)
+{
+  return gzwrite((gzFile) cookie, buf, count);
+}
+static fpos_t gzseek_(void *cookie, fpos_t offset, int whence)
+{
+  return gzseek((gzFile) cookie, offset, whence);
+}
+static int gzclose_(void *cookie)
+{
+  return gzclose(cookie);
+}
+#endif
+
 FILE *Fzopen(char *name, char *mode)
 { gzFile zfp;
-
+#ifdef HAVE_FOPENCOOKIE
+  cookie_io_functions_t io_funcs = { gzread_, gzwrite_, gzseek_, gzclose_ };
+#endif
   if (name == NULL || mode == NULL)
     return (NULL);
 
@@ -64,11 +117,11 @@ FILE *Fzopen(char *name, char *mode)
   if (zfp == NULL)
     return fopen(name,mode);
 
-  return funopen(zfp,
-                 (int(*)(void*,char*,int))gzread,
-                 (int(*)(void*,const char*,int))gzwrite,
-                 (fpos_t(*)(void*,fpos_t,int))gzseek,
-                 (int(*)(void*))gzclose);
+#ifdef HAVE_FOPENCOOKIE
+  return fopencookie(zfp, mode, io_funcs);
+#else
+  return funopen(zfp, gzread_, gzwrite_, gzseek_, gzclose_);
+#endif
 }
 
 char *PathTo(char *name)
